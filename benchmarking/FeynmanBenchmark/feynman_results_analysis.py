@@ -20,7 +20,7 @@ import physo.benchmark.utils.metrics_utils as metrics_utils
 import physo.benchmark.utils.timeout_unix  as timeout_unix
 import physo.benchmark.utils.read_logs     as read_logs
 # Local imports
-import feynman_config as fconfig
+import benchmarking.FeynmanBenchmark.feynman_config as fconfig
 from benchmarking import utils as bu
 
 

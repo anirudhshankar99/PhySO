@@ -2,10 +2,11 @@
 # Internal imports
 from physo.physym import batch as Batch
 from physo.learn import rnn
-from physo.learn import learn
+from physo.learn import decoder_transformer as transformer
+# from physo.physym import equation
 
-
-def fit(multi_X, multi_y, run_config, multi_y_weights = 1., candidate_wrapper = None, stop_reward = 1., stop_after_n_epochs = 1, max_n_evaluations = None):
+def fit(multi_X, multi_y, run_config, multi_y_weights = 1., candidate_wrapper = None, stop_reward = 1., stop_after_n_epochs = 1, max_n_evaluations = None, 
+        mode = 'L'):
     """
     Run a symbolic regression task on (X,y) data.
     Parameters
@@ -45,7 +46,7 @@ def fit(multi_X, multi_y, run_config, multi_y_weights = 1., candidate_wrapper = 
         hall_of_fame_R : Corresponding reward values.
         Use hall_of_fame[-1] to access best model found.
     """
-
+    print('Mode: ',mode)
     def batch_reseter():
         return  Batch.Batch (library_args          = run_config["library_config"],
                              priors_config         = run_config["priors_config"],
@@ -71,25 +72,52 @@ def fit(multi_X, multi_y, run_config, multi_y_weights = 1., candidate_wrapper = 
                         )
 
         return cell
+    
+    def transformer_model (embedding_dim= 32, num_heads= 4, num_layers= 3, ff_dim= 128, max_seq_len=256, dropout_fraction=0.1, 
+                                        input_size=batch.obs_size, output_size=batch.n_choices):
+        model = transformer.Decoder(embedding_dim=embedding_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, max_seq_len=max_seq_len, dropout_fraction=dropout_fraction, input_size=input_size, output_size=output_size)
+        return model
 
-    cell      = cell_reseter ()
-    optimizer = run_config["learning_config"]["get_optimizer"](cell)
+    assert mode.upper() == 'L' or mode.upper() == 'T' or mode.upper() == 'TP'
+    if mode.upper() == 'L':
+        from physo.learn import learn
+        cell      = cell_reseter ()
+        optimizer = run_config["learning_config"]["get_optimizer"](cell)
 
 
-    hall_of_fame_R, hall_of_fame = learn.learner (
-                                                    model               = cell,
-                                                    optimizer           = optimizer,
-                                                    n_epochs            = run_config["learning_config"]["n_epochs"],
-                                                    batch_reseter       = batch_reseter,
-                                                    risk_factor         = run_config["learning_config"]["risk_factor"],
-                                                    gamma_decay         = run_config["learning_config"]["gamma_decay"],
-                                                    entropy_weight      = run_config["learning_config"]["entropy_weight"],
-                                                    verbose             = False,
-                                                    stop_reward         = stop_reward,
-                                                    stop_after_n_epochs = stop_after_n_epochs,
-                                                    max_n_evaluations   = max_n_evaluations,
-                                                    run_logger          = run_config["run_logger"],
-                                                    run_visualiser      = run_config["run_visualiser"],
-                                                   )
+        hall_of_fame_R, hall_of_fame = learn.learner (
+                                                        model               = cell,
+                                                        optimizer           = optimizer,
+                                                        n_epochs            = run_config["learning_config"]["n_epochs"],
+                                                        batch_reseter       = batch_reseter,
+                                                        risk_factor         = run_config["learning_config"]["risk_factor"],
+                                                        gamma_decay         = run_config["learning_config"]["gamma_decay"],
+                                                        entropy_weight      = run_config["learning_config"]["entropy_weight"],
+                                                        verbose             = False,
+                                                        stop_reward         = stop_reward,
+                                                        stop_after_n_epochs = stop_after_n_epochs,
+                                                        max_n_evaluations   = max_n_evaluations,
+                                                        run_logger          = run_config["run_logger"],
+                                                        run_visualiser      = run_config["run_visualiser"],
+                                                    )
 
+    elif mode.upper() == 'T':
+        from physo.learn import learn_transformer as learn
+        model = transformer_model ()
+        optimizer = run_config["learning_config"]["get_optimizer"](model)
+        hall_of_fame_R, hall_of_fame = learn.learner (
+                                                        model               = model,
+                                                        optimizer           = optimizer,
+                                                        n_epochs            = run_config["learning_config"]["n_epochs"],
+                                                        batch_reseter       = batch_reseter,
+                                                        risk_factor         = run_config["learning_config"]["risk_factor"],
+                                                        gamma_decay         = run_config["learning_config"]["gamma_decay"],
+                                                        entropy_weight      = run_config["learning_config"]["entropy_weight"],
+                                                        verbose             = False,
+                                                        stop_reward         = stop_reward,
+                                                        stop_after_n_epochs = stop_after_n_epochs,
+                                                        max_n_evaluations   = max_n_evaluations,
+                                                        run_logger          = run_config["run_logger"],
+                                                        run_visualiser      = run_config["run_visualiser"],
+                                                    )
     return hall_of_fame_R, hall_of_fame
