@@ -49,3 +49,5 @@ science/galaxy_profile/nihaoap_class_sr_v*/equations_*.png
 .env/
 benchmarking/FeynmanBenchmark/jobfile*
 benchmarking/FeynmanBenchmark/results*
+benchmarking/FeynmanBenchmark/
+pics/

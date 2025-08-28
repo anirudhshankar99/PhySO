@@ -6,7 +6,7 @@ from physo.learn import decoder_transformer as transformer
 # from physo.physym import equation
 
 def fit(multi_X, multi_y, run_config, multi_y_weights = 1., candidate_wrapper = None, stop_reward = 1., stop_after_n_epochs = 1, max_n_evaluations = None, 
-        mode = 'L'):
+        mode = 'T'):
     """
     Run a symbolic regression task on (X,y) data.
     Parameters
@@ -50,7 +50,7 @@ def fit(multi_X, multi_y, run_config, multi_y_weights = 1., candidate_wrapper = 
     def batch_reseter():
         return  Batch.Batch (library_args          = run_config["library_config"],
                              priors_config         = run_config["priors_config"],
-                             batch_size            = run_config["learning_config"]["batch_size"],
+                             batch_size            = run_config["learning_config"]["batch_size"]//2,
                              max_time_step         = run_config["learning_config"]["max_time_step"],
                              rewards_computer      = run_config["learning_config"]["rewards_computer"],
                              free_const_opti_args  = run_config["free_const_opti_args"],
@@ -73,7 +73,7 @@ def fit(multi_X, multi_y, run_config, multi_y_weights = 1., candidate_wrapper = 
 
         return cell
     
-    def transformer_model (embedding_dim= 32, num_heads= 4, num_layers= 3, ff_dim= 128, max_seq_len=256, dropout_fraction=0.1, 
+    def transformer_model (embedding_dim= 32, num_heads= 4, num_layers= 3, ff_dim= 64, max_seq_len=256, dropout_fraction=0.1, 
                                         input_size=batch.obs_size, output_size=batch.n_choices):
         model = transformer.Decoder(embedding_dim=embedding_dim, num_heads=num_heads, num_layers=num_layers, ff_dim=ff_dim, max_seq_len=max_seq_len, dropout_fraction=dropout_fraction, input_size=input_size, output_size=output_size)
         return model
@@ -110,7 +110,7 @@ def fit(multi_X, multi_y, run_config, multi_y_weights = 1., candidate_wrapper = 
                                                         optimizer           = optimizer,
                                                         n_epochs            = run_config["learning_config"]["n_epochs"],
                                                         batch_reseter       = batch_reseter,
-                                                        risk_factor         = run_config["learning_config"]["risk_factor"],
+                                                        risk_factor         = 2*run_config["learning_config"]["risk_factor"],
                                                         gamma_decay         = run_config["learning_config"]["gamma_decay"],
                                                         entropy_weight      = run_config["learning_config"]["entropy_weight"],
                                                         verbose             = False,
