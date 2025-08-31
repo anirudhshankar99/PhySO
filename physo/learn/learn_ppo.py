@@ -74,7 +74,7 @@ def learner ( actor,
     hall_of_fame          = []
     # Nb. of expressions evaluated
     n_evaluated           = 0
-
+    
     for epoch in range (n_epochs):
 
         if verbose>1: print("Epoch %i/%i"%(epoch, n_epochs))
@@ -91,10 +91,10 @@ def learner ( actor,
         output_size = batch.n_choices
 
         # Initial RNN cell input
-        # states = model.get_zeros_initial_state(batch_size)  # (n_layers, 2, batch_size, hidden_size)
+        actor_states = actor.get_zeros_initial_state(batch_size)  # (n_layers, 2, batch_size, hidden_size)
+        critic_states = critic.get_zeros_initial_state(batch_size)  # (n_layers, 2, batch_size, hidden_size)
 
         # Optimizer reset
-        # optimizer.zero_grad()
 
         # Candidates
         # logits        = []
@@ -109,28 +109,32 @@ def learner ( actor,
         observations = torch.zeros(max_time_step, batch_size, input_size)
         rollout_actions = torch.zeros(max_time_step, batch_size)
         rollout_logprobs = torch.zeros(max_time_step, batch_size)
-        rewards = torch.zeros(max_time_step, batch_size)
-        values = torch.zeros(max_time_step, batch_size)
+        rollout_rewards = torch.zeros(max_time_step, batch_size)
+        rollout_values = torch.zeros(max_time_step, batch_size)
+        rollout_prior_logprobs = torch.zeros(max_time_step, batch_size, output_size)
+
+        pre_rollout_actor_states = actor_states.clone()
+        pre_rollout_critic_states = critic_states.clone()
         # RNN run
         for i in range (max_time_step):
 
             # ------------ OBSERVATIONS ------------
-            # (embedding output)
-            state = torch.tensor(batch.get_obs().astype(np.float32), requires_grad=False,) # (batch_size, obs_size)
+            environment_state = torch.tensor(batch.get_obs().astype(np.float32), requires_grad=False,) # (batch_size, obs_size)
 
             # ------------ MODEL ------------
 
             # Giving up-to-date observations
-            output = actor(state)    # (batch_size, output_size)
-            value = critic(state)
+            with torch.no_grad():
+                policy_logits, actor_states = actor(input_tensor = environment_state,
+                                      states = actor_states)    # (batch_size, output_size)
+                value, critic_states = critic(input_tensor = environment_state,
+                                            states = critic_states)
+            value = value.flatten()
 
             # Getting raw prob distribution for action n°i
-            outlogit = output[:,:-1]                                         # (batch_size, output_size)
-            estimated_step_reward = output[:,-1]                             # (batch_size, 1)
 
             # ------------ PRIOR ------------
 
-            # (embedding output)
             prior_array = batch.prior().astype(np.float32)         # (batch_size, output_size)
 
             # 0 protection so there is always something to sample
@@ -146,116 +150,72 @@ def learner ( actor,
 
             # ------------ SAMPLING ------------
 
-            logprob  = outlogit + logprior                              # (batch_size, output_size)
-            action = torch.multinomial(torch.exp(logprob),              # (batch_size,)
-                                       num_samples=1)[:, 0]
+            combined_logits  = policy_logits + logprior                              # (batch_size, output_size)
+            dists = torch.distributions.Categorical(logits=combined_logits)
+            action = dists.sample()
+            logprob = dists.log_prob(action)
 
             # ------------ ACTION ------------
 
             # Saving action n°i
             rollout_logprobs[i] = logprob
             rollout_actions[i] = action
-            observations[i] = state
-            values[i] = state
-            # logits       .append(logprob)
-            # actions      .append(action)
+            observations[i] = environment_state
+            rollout_values[i] = value
+            rollout_prior_logprobs[i] = logprior
 
-            # Informing embedding of new action
-            # (embedding input)
             batch.programs.append(action.detach().cpu().numpy())
+        rollout_dones = torch.tensor(batch.programs.n_lengths - 1, dtype=torch.int)
 
-        # -------------------------------------------------
-        # ------------------ CANDIDATES  ------------------
-        # -------------------------------------------------
-
-        # Keeping prob distribution history for backpropagation
-        # logits         = torch.stack(logits        , dim=0)         # (max_time_step, batch_size, n_choices, )
-        # actions        = torch.stack(actions       , dim=0)         # (max_time_step, batch_size,)
-
-        # Programs as numpy array for black box reward computation
-        actions_array  = rollout_actions.detach().cpu().numpy()             # (max_time_step, batch_size,)
-
-        # -------------------------------------------------
-        # -------------------- REWARD ---------------------
-        # -------------------------------------------------
-
-        # (embedding output)
-        R = batch.get_rewards()
-
-        # -------------------------------------------------
-        # ---------------- BEST CANDIDATES ----------------
-        # -------------------------------------------------
-
-        # index of elite candidates
-        # copy to avoid negative stride problem
-        # https://discuss.pytorch.org/t/torch-from-numpy-not-support-negative-strides/3663/7
+        actor_states = pre_rollout_actor_states
+        critic_states = pre_rollout_critic_states
+        R = batch.get_rewards() # (B,)
         keep    = R.argsort()[::-1][0:n_keep].copy()                              # (n_keep,)
         notkept = R.argsort()[::-1][n_keep: ].copy()                              # (batch_size-n_keep,)
+        zero_mask = R == 0
+        R[zero_mask] = -0.1
+        rollout_rewards[rollout_dones, torch.arange(batch_size)] = torch.tensor(R, dtype=torch.float32)
 
-        # ----------------- Train batch : black box part (NUMPY) -----------------
+        rtgs = loss_ppo.compute_rtgs(rollout_rewards, rollout_dones, gamma)
+        advantages = rtgs - rollout_values.detach()
+        advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
 
-        # Elite candidates
-        actions_array_train     = actions_array [:, keep]                         # (max_time_step, n_keep,)
-        # Elite candidates as one-hot target probs
-        ideal_probs_array_train = np.eye(batch.n_choices)[actions_array_train]    # (max_time_step, n_keep, n_choices,)
+        n_train = n_keep
+        lengths = batch.programs.n_lengths[keep]
+        mask_length_np = np.tile(np.arange(0, max_time_step), (n_train, 1)  # (n_train, max_time_step,)
+                                ).astype(int) < np.tile(lengths, (max_time_step, 1)).transpose()
+        mask_length_np = mask_length_np.transpose().astype(float)  # (max_time_step, n_train,)
+        mask_length = torch.tensor(mask_length_np, requires_grad=False)  # (max_time_step, n_train,)
 
-        # Elite candidates rewards
-        R_train = torch.tensor(R[keep], requires_grad=False)                      # (n_keep,)
-        R_lim   = R_train.min()
-
-        # Elite candidates as one-hot in torch
-        # (non-differentiable tensors)
-        ideal_probs_train = torch.tensor(                                         # (max_time_step, n_keep, n_choices,)
-                                ideal_probs_array_train.astype(np.float32),
-                                requires_grad=False,)
-
-        # -------------- Train batch : differentiable part (TORCH) ---------------
-        # Elite candidates pred logprobs
-        logits_train            = logits[:, keep]                                 # (max_time_step, n_keep, n_choices,)
-
-        # -------------------------------------------------
-        # ---------------------- LOSS ---------------------
-        # -------------------------------------------------
-
-        # Lengths of programs
-        lengths = batch.programs.n_lengths[keep]                                  # (n_keep,)
-
-        # Reward baseline
-        #baseline = RISK_FACTOR - 1
-        baseline = R_lim
-
-        rtgs = loss_ppo.compute_rtgs(rewards, done_index, gamma)
-        advantages = rtgs - values.detach()
-        for update_iteration in range(num_update_interations):
-            # Loss
-            update_probs = actor(observations) #?
-            values = critic(observations) #?
-            actor_loss, entropy_loss, critic_loss = loss_ppo.loss_func (values=values, 
-                                        update_probs=update_probs, 
-                                        actions=actions_array_train,
-                                        advantages=advantages, 
-                                        rtgs=rtgs, 
-                                        rollout_logprobs=rollout_logprobs, 
-                                        ideal_probs_train=ideal_probs_train, 
-                                        lengths=lengths,
-                                        entropy_weight=entropy_weight, 
+        actor_states_init, critic_states_init = actor_states.clone(), critic_states.clone()
+        for _ in range(num_update_interations):
+            update_logprobs = torch.zeros(max_time_step, batch_size)
+            update_values = torch.zeros(max_time_step, batch_size)
+            actor_states, critic_states = actor_states_init.clone(), critic_states_init.clone()
+            for j in range(max_time_step):
+                update_policy_logits, actor_states = actor(input_tensor = observations[j], states = actor_states)
+                values, critic_states = critic(input_tensor = observations[j], states = critic_states)
+                values = values.squeeze(-1)
+                update_combined_logits = update_policy_logits + rollout_prior_logprobs[j]
+                dists = torch.distributions.Categorical(logits=update_combined_logits)
+                logprob = dists.log_prob(rollout_actions[j])
+                update_logprobs[j] = logprob
+                update_values[j] = values
+            actor_loss, clipfracs, critic_loss = loss_ppo.loss_func (values=update_values[:, keep], 
+                                        update_logprobs=update_logprobs[:, keep],
+                                        advantages=advantages[:, keep], 
+                                        rtgs=rtgs[:, keep], 
+                                        rollout_logprobs=rollout_logprobs[:, keep],
                                         eps=eps)
             
-            actor_loss = actor_loss + entropy_loss
-
-            # -------------------------------------------------
-            # ---------------- BACKPROPAGATION ----------------
-            # -------------------------------------------------
-            # No need to do backpropagation if model is lobotomized (ie. is just a random number generator).
-            if actor.is_lobotomized:
-                pass
-            else:
-                actor_optimiser.zero_grad()
-                actor_loss  .backward()
-                actor_optimiser .step()
-                critic_optimiser.zero_grad()
-                critic_loss  .backward()
-                critic_optimiser .step()
+            actor_loss = torch.mean(actor_loss * mask_length)
+            critic_loss = (critic_loss * mask_length).pow(2).mean()
+            actor_optimiser.zero_grad()
+            actor_loss  .backward()
+            actor_optimiser .step()
+            critic_optimiser.zero_grad()
+            critic_loss  .backward()
+            critic_optimiser .step()
 
         # -------------------------------------------------
         # ----------------- LOGGING VALUES ----------------

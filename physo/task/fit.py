@@ -3,7 +3,9 @@
 from physo.physym import batch as Batch
 from physo.learn import rnn
 from physo.learn import learn
-
+from physo.learn import learn_ppo
+from torch import nn
+from torch.optim import Adam
 
 def fit(multi_X, multi_y, run_config, multi_y_weights = 1., candidate_wrapper = None, stop_reward = 1., stop_after_n_epochs = 1, max_n_evaluations = None):
     """
@@ -62,9 +64,8 @@ def fit(multi_X, multi_y, run_config, multi_y_weights = 1., candidate_wrapper = 
 
     batch = batch_reseter()
 
-    def cell_reseter ():
+    def cell_reseter (output_size = batch.n_choices):
         input_size  = batch.obs_size
-        output_size = batch.n_choices
         cell = rnn.Cell (input_size  = input_size,
                          output_size = output_size,
                          **run_config["cell_config"],
@@ -75,21 +76,62 @@ def fit(multi_X, multi_y, run_config, multi_y_weights = 1., candidate_wrapper = 
     cell      = cell_reseter ()
     optimizer = run_config["learning_config"]["get_optimizer"](cell)
 
+    def get_models(in_shape, out_shape):
+        # Actor module, categorical actions only
+        actor = nn.Sequential(
+                nn.Linear(in_shape, 128),
+                nn.ReLU(),
+                nn.Linear(128, 64),
+                nn.ReLU(),
+                nn.Linear(64, out_shape),
+                nn.Softmax(dim=-1)
+            )
+        critic = nn.Sequential(
+                nn.Linear(in_shape, 128),
+                nn.ReLU(),
+                nn.Linear(128, 64),
+                nn.ReLU(),
+                nn.Linear(64, 1)
+            )
+        return actor, critic
+    # actor, critic = get_models(batch.obs_size, batch.n_choices)
+    actor, critic = cell_reseter(), cell_reseter(output_size=1)
+    actor_optimiser, critic_optimiser = run_config["learning_config"]["get_optimizer"](actor), run_config["learning_config"]["get_optimizer"](critic)
 
-    hall_of_fame_R, hall_of_fame = learn.learner (
-                                                    model               = cell,
-                                                    optimizer           = optimizer,
-                                                    n_epochs            = run_config["learning_config"]["n_epochs"],
-                                                    batch_reseter       = batch_reseter,
-                                                    risk_factor         = run_config["learning_config"]["risk_factor"],
-                                                    gamma_decay         = run_config["learning_config"]["gamma_decay"],
-                                                    entropy_weight      = run_config["learning_config"]["entropy_weight"],
-                                                    verbose             = False,
-                                                    stop_reward         = stop_reward,
-                                                    stop_after_n_epochs = stop_after_n_epochs,
-                                                    max_n_evaluations   = max_n_evaluations,
-                                                    run_logger          = run_config["run_logger"],
-                                                    run_visualiser      = run_config["run_visualiser"],
-                                                   )
+    # hall_of_fame_R, hall_of_fame = learn.learner (
+    #                                                 model               = cell,
+    #                                                 optimizer           = optimizer,
+    #                                                 n_epochs            = run_config["learning_config"]["n_epochs"],
+    #                                                 batch_reseter       = batch_reseter,
+    #                                                 risk_factor         = run_config["learning_config"]["risk_factor"],
+    #                                                 gamma_decay         = run_config["learning_config"]["gamma_decay"],
+    #                                                 entropy_weight      = run_config["learning_config"]["entropy_weight"],
+    #                                                 verbose             = False,
+    #                                                 stop_reward         = stop_reward,
+    #                                                 stop_after_n_epochs = stop_after_n_epochs,
+    #                                                 max_n_evaluations   = max_n_evaluations,
+    #                                                 run_logger          = run_config["run_logger"],
+    #                                                 run_visualiser      = run_config["run_visualiser"],
+    #                                                )
+    
+    hall_of_fame_R, hall_of_fame = learn_ppo.learner(   
+                                                        actor=actor,
+                                                        actor_optimiser=actor_optimiser,
+                                                        critic=critic,
+                                                        critic_optimiser=critic_optimiser,
+                                                        n_epochs=3*run_config["learning_config"]["n_epochs"],
+                                                        num_update_interations=5,
+                                                        batch_reseter=batch_reseter,
+                                                        risk_factor=run_config["learning_config"]["risk_factor"],
+                                                        gamma=0.99,
+                                                        entropy_weight=run_config["learning_config"]["entropy_weight"],
+                                                        eps=0.2,
+                                                        verbose=False,
+                                                        stop_reward=stop_reward,
+                                                        stop_after_n_epochs=stop_after_n_epochs,
+                                                        max_n_evaluations=max_n_evaluations,
+                                                        run_logger          = run_config["run_logger"],
+                                                        run_visualiser      = run_config["run_visualiser"],
+                                                    )
 
     return hall_of_fame_R, hall_of_fame

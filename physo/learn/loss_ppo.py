@@ -2,28 +2,36 @@ import torch
 import numpy as np
 
 
-def safe_cross_entropy(p, logq, dim=-1):
-    safe_logq = torch.where(p == 0, torch.ones_like(logq), logq)
-    return -torch.sum(p * safe_logq, dim=dim)
-
 def compute_rtgs(rewards, done_index, gamma):
+    # rewards: (T, B) with only terminal step having non-zero reward
+    # done_index: (B,) integer index of terminal step per sequence
+
+    T, B = rewards.shape
     rtgs = torch.zeros_like(rewards)
-    for t_ in reversed(range(done_index)):
-        if t_ == done_index - 1: rtgs[t_] = rewards[t_]
-        else: rtgs[t_] = rewards[t_] + rtgs[t_ + 1] * gamma
+    # Build a done mask per time-step: done_mask[t, b] == 1 if t == done_index[b]
+    done_mask = torch.zeros_like(rewards, dtype=torch.bool)
+    # done_mask[done_index(i), i] = True for all i
+    done_mask[done_index, torch.arange(B)] = True # Boolean of shape (T, B,) for sequences that are completed
+
+    G = torch.zeros(B, dtype=rewards.dtype, device=rewards.device)
+    for t in reversed(range(T)):
+        # If terminal at t, reset return to immediate reward (no bootstrapping past terminal)
+        G = torch.where(done_mask[t], rewards[t], rewards[t] + gamma * G)
+        rtgs[t] = G
+
     return rtgs
 
 def policy_loss(old_log_prob, log_prob, advantage, eps):
     ratio = (log_prob - old_log_prob).exp()
-    clipped = torch.clamp(ratio, 1-eps, 1+eps)*advantage.unsqueeze(-1)
+    clipped = torch.clamp(ratio, 1-eps, 1+eps)*advantage
     
-    m = torch.min(ratio*advantage.unsqueeze(-1), clipped)
+    m = torch.min(ratio*advantage, clipped)
     logratio = log_prob - old_log_prob
     approx_kl = ((ratio - 1) - logratio).mean()
     clipfracs = [((ratio - 1.0).abs() > eps).float().mean().item()]
     return -m, approx_kl, clipfracs
 
-def loss_func(values, update_probs, actions, advantages, rtgs, rollout_logprobs, ideal_probs_train, lengths, entropy_weight, eps):
+def loss_func(values, update_logprobs, advantages, rtgs, rollout_logprobs, eps):
     """
     Loss function for reinforcing symbolic programs.
     Parameters
@@ -33,22 +41,7 @@ def loss_func(values, update_probs, actions, advantages, rtgs, rollout_logprobs,
     -------
 
     """
-    update_dist = torch.distributions.Categorical(update_probs)
-    update_logprobs = update_dist.log_prob(actions)
-    actor_loss, _, __ = policy_loss(rollout_logprobs, update_logprobs, advantages, eps)
-    actor_loss = actor_loss.mean()
-    critic_loss = (values - rtgs).pow(2).mean()
+    actor_loss, _, clipfracs = policy_loss(rollout_logprobs, update_logprobs, advantages, eps)
+    critic_loss = values - rtgs
 
-    (max_time_step, n_train, n_choices,) = ideal_probs_train.shape
-    mask_length_np = np.tile(np.arange(0, max_time_step), (n_train, 1)  # (n_train, max_time_step,)
-                             ).astype(int) < np.tile(lengths, (max_time_step, 1)).transpose()
-    mask_length_np = mask_length_np.transpose().astype(float)  # (max_time_step, n_train,)
-    mask_length = torch.tensor(mask_length_np, requires_grad=False)  # (max_time_step, n_train,)
-
-    # Sum over action dim
-    entropy_per_step = safe_cross_entropy(update_probs, update_logprobs, dim=2)  # (max_time_step, n_train,)
-    # Sum over sequence dim
-    entropy = torch.sum(entropy_per_step * mask_length, dim=0)  # (n_train,)
-    entropy_loss = -entropy_weight * torch.mean(entropy)
-
-    return actor_loss, entropy_loss, critic_loss
+    return actor_loss, clipfracs, critic_loss
