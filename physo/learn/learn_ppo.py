@@ -191,6 +191,7 @@ def learner ( actor,
         for _ in range(num_update_interations):
             update_logprobs = torch.zeros(max_time_step, batch_size)
             update_values = torch.zeros(max_time_step, batch_size)
+            entropies = torch.zeros(max_time_step, batch_size)
             actor_states, critic_states = actor_states_init.clone(), critic_states_init.clone()
             for j in range(max_time_step):
                 update_policy_logits, actor_states = actor(input_tensor = observations[j], states = actor_states)
@@ -201,6 +202,7 @@ def learner ( actor,
                 logprob = dists.log_prob(rollout_actions[j])
                 update_logprobs[j] = logprob
                 update_values[j] = values
+                entropies[j] = dists.entropy()
             actor_loss, clipfracs, critic_loss = loss_ppo.loss_func (values=update_values[:, keep], 
                                         update_logprobs=update_logprobs[:, keep],
                                         advantages=advantages[:, keep], 
@@ -208,7 +210,8 @@ def learner ( actor,
                                         rollout_logprobs=rollout_logprobs[:, keep],
                                         eps=eps)
             
-            actor_loss = torch.mean(actor_loss * mask_length)
+            entropy_loss = -entropy_weight * (entropies[:, keep] * mask_length).mean()
+            actor_loss = torch.mean(actor_loss * mask_length) + entropy_loss
             critic_loss = (critic_loss * mask_length).pow(2).mean()
             actor_optimiser.zero_grad()
             actor_loss  .backward()
